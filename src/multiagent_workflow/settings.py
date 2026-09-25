@@ -11,6 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only on Python 3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
 
+
 ARCHITECTURES = {"standalone", "c2c"}
 SANDBOX_MODES = {"workspace-write", "danger-full-access"}
 PROJECT_ALLOWED_KEYS = {
