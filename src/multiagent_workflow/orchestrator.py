@@ -8,24 +8,34 @@ from pathlib import Path
 from typing import Any
 
 from .backend import AgentBackend
-from .gitops import EvidenceBundle, checkpoint, collect_evidence, create_worktree, head_sha, repo_root
+from .gitops import (
+    EvidenceBundle,
+    checkpoint,
+    collect_evidence,
+    create_worktree,
+    head_sha,
+    repo_root,
+)
 from .schema import MANAGER_SCHEMA, REVIEW_SCHEMA, ManagerPlan, ReviewResult, TaskSpec
 
 
 @dataclass(slots=True)
 class WorkflowConfig:
+    """Configuration for the original standalone Manager -> Worker -> Reviewer loop."""
+
     repo: Path
-    manager_model: str = "gpt-5.6-sol"
-    worker_model: str = "gpt-5.5"
-    reviewer_model: str = "gpt-5.6-sol"
-    manager_effort: str = "high"
-    worker_effort: str = "high"
-    reviewer_effort: str = "high"
+    manager_model: str | None = None
+    worker_model: str | None = None
+    reviewer_model: str | None = None
+    manager_effort: str | None = None
+    worker_effort: str | None = None
+    reviewer_effort: str | None = None
     max_revisions: int = 3
     verify_commands: list[str] = field(default_factory=list)
     verify_timeout_seconds: int | None = 1800
     isolate_worktree: bool = True
     worker_sandbox: str = "workspace-write"
+    inherit_codex_config: bool = False
     state_root: Path = field(
         default_factory=lambda: Path.home() / ".multiagent-workflow" / "runs"
     )
@@ -61,6 +71,7 @@ class WorkflowResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "architecture": "standalone",
             "run_id": self.run_id,
             "plan": self.plan.to_dict(),
             "outcomes": [outcome.to_dict() for outcome in self.outcomes],
@@ -71,6 +82,8 @@ class WorkflowResult:
 
 
 def run_workflow(*, goal: str, backend: AgentBackend, config: WorkflowConfig) -> WorkflowResult:
+    """Run the original standalone Manager -> Worker -> Reviewer architecture."""
+
     if not goal.strip():
         raise ValueError("goal must not be empty")
     if config.max_revisions < 0:
@@ -95,6 +108,7 @@ def run_workflow(*, goal: str, backend: AgentBackend, config: WorkflowConfig) ->
     _write_json(
         state_dir / "run.json",
         {
+            "architecture": "standalone",
             "run_id": run_id,
             "goal": goal,
             "source_repo": str(source_repo),
@@ -113,6 +127,7 @@ def run_workflow(*, goal: str, backend: AgentBackend, config: WorkflowConfig) ->
         sandbox="read-only",
         effort=config.manager_effort,
         output_schema=MANAGER_SCHEMA,
+        inherit_user_config=config.inherit_codex_config,
     )
     plan = ManagerPlan.from_dict(_parse_json_object(manager_text, "manager"))
     _write_json(state_dir / "plan.json", plan.to_dict())
@@ -146,6 +161,7 @@ def run_workflow(*, goal: str, backend: AgentBackend, config: WorkflowConfig) ->
                 sandbox=config.worker_sandbox,
                 effort=config.worker_effort,
                 output_schema=None,
+                inherit_user_config=config.inherit_codex_config,
             )
             (attempt_dir / "worker.md").write_text(worker_text, encoding="utf-8")
 
@@ -166,6 +182,7 @@ def run_workflow(*, goal: str, backend: AgentBackend, config: WorkflowConfig) ->
                 sandbox="read-only",
                 effort=config.reviewer_effort,
                 output_schema=REVIEW_SCHEMA,
+                inherit_user_config=config.inherit_codex_config,
             )
             final_review = ReviewResult.from_dict(
                 _parse_json_object(reviewer_text, "reviewer")

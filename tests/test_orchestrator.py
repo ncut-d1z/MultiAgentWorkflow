@@ -13,8 +13,28 @@ from multiagent_workflow.schema import MANAGER_SCHEMA, REVIEW_SCHEMA
 class FakeBackend:
     def __init__(self) -> None:
         self.reviews = 0
+        self.calls: list[dict] = []
 
-    def run(self, *, role, model, cwd, prompt, sandbox, effort, output_schema=None):
+    def run(
+        self,
+        *,
+        role,
+        model,
+        cwd,
+        prompt,
+        sandbox,
+        effort,
+        output_schema=None,
+        inherit_user_config=False,
+    ):
+        self.calls.append(
+            {
+                "role": role,
+                "model": model,
+                "effort": effort,
+                "inherit_user_config": inherit_user_config,
+            }
+        )
         if role == "manager":
             self.assert_schema(output_schema, MANAGER_SCHEMA)
             return json.dumps(
@@ -59,35 +79,13 @@ class OrchestratorTests(unittest.TestCase):
     def test_end_to_end_with_isolated_worktree(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            repo = root / "repo"
-            repo.mkdir()
-            subprocess.run(
-                ["git", "init", "-b", "main", str(repo)],
-                check=True,
-                capture_output=True,
-            )
-            (repo / "README.md").write_text("seed\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(repo),
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                    "commit",
-                    "-m",
-                    "seed",
-                ],
-                check=True,
-                capture_output=True,
-            )
+            repo = init_repo(root / "repo")
 
             backend = FakeBackend()
             config = WorkflowConfig(
                 repo=repo,
+                worker_model="worker-model",
+                worker_effort="high",
                 state_root=root / "state",
                 worktree_root=root / "worktrees",
                 verify_commands=[],
@@ -99,6 +97,37 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(result.outcomes[0].review.decision, "PASS")
             self.assertIsNotNone(result.outcomes[0].checkpoint_sha)
             self.assertEqual(backend.reviews, 1)
+            worker_call = next(call for call in backend.calls if call["role"] == "worker")
+            self.assertEqual(worker_call["model"], "worker-model")
+            self.assertEqual(worker_call["effort"], "high")
+
+
+def init_repo(repo: Path) -> Path:
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main", str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "seed",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return repo
 
 
 if __name__ == "__main__":

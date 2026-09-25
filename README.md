@@ -1,81 +1,56 @@
 # MultiAgentWorkflow
 
-A small, deterministic **Manager -> Worker -> Reviewer** coding workflow that uses the
-OpenAI Codex CLI and its existing **Sign in with ChatGPT** session. No manually copied
-OpenAI API key is required.
+MultiAgentWorkflow (MAW) is a deterministic coding-agent harness built around the OpenAI
+Codex CLI and its **Sign in with ChatGPT** authentication. It supports two deliberately
+separate workflow architectures:
 
-```text
-User goal
-   |
-   v
-Manager (default: gpt-5.6-sol, read-only)
-   |
-   v
-TaskSpec[]
-   |
-   v
-Worker (default: gpt-5.5, workspace-write)
-   |
-   v
-Harness captures real git diff/status + verifier output
-   |
-   v
-Reviewer (default: gpt-5.6-sol, read-only)
-   | PASS
-   +------------------> checkpoint -> next task
-   |
-   | REVISE
-   v
-Fresh Worker context + reviewer findings
-```
+1. **`standalone`** — MAW owns the full `Manager -> Worker -> Reviewer` loop.
+2. **`c2c`** — designed for [`codex-with-chatgpt`](https://github.com/XiaoDuoYa/codex-with-chatgpt):
+   ChatGPT owns planning/review and MAW executes one Worker iteration plus deterministic
+   verification/evidence collection.
 
-The control loop lives in Python, not in a prompt. The Reviewer never receives only the
-Worker's self-report: the harness independently gathers the git diff, repository status,
-and configured verification command results.
+The user explicitly selects the architecture. MAW does **not** auto-detect or silently
+switch architectures.
+
+## No hard-coded Worker model
+
+MAW intentionally does not ship with a fixed Worker model such as `gpt-5.5`.
+
+- Set a Worker model explicitly when you want a pinned model.
+- Set a Worker reasoning effort explicitly when you want a pinned effort.
+- Leave either value unset to let the current Codex installation/account choose its
+  current default.
+
+This means model retirement does not require a MAW code release just to change a default.
+Model IDs and reasoning-effort names are treated as open-ended strings and are forwarded to
+Codex without maintaining a stale allow-list in MAW.
 
 ## Authentication: no API key required
 
-This project intentionally drives the **Codex CLI**, not the generic OpenAI Responses API.
-Codex can authenticate using your ChatGPT account:
+MAW drives the **Codex CLI**, not the generic OpenAI Responses API. Sign in once:
 
 ```powershell
 codex login
 ```
 
-Choose **Sign in with ChatGPT** in the browser flow. MultiAgentWorkflow then invokes
-`codex exec` and reuses that stored Codex login state.
-
-You can also run:
+Choose **Sign in with ChatGPT**. You can also run:
 
 ```powershell
 maw login
 ```
 
-Important distinction: **Sign in with ChatGPT is not a general replacement for an OpenAI
-API key in arbitrary API clients.** It works here because Codex officially supports
-ChatGPT-account authentication. If you rewrite this project to call `/v1/responses`
-directly with the normal OpenAI SDK, use the API authentication required by that API.
+MAW removes `OPENAI_API_KEY` and `CODEX_API_KEY` from Codex child-process environments by
+default so a stale API-key environment variable does not unexpectedly override the stored
+ChatGPT login.
 
-MultiAgentWorkflow removes `OPENAI_API_KEY` and `CODEX_API_KEY` from Codex child-process
-environments by default so stale API-key variables cannot override the stored ChatGPT
-login.
+## Install
 
-## Requirements
+Requirements:
 
 - Windows 11, macOS, or Linux
 - Python 3.10+
 - Git
 - Current OpenAI Codex CLI
-- A ChatGPT plan/account that can use the selected Codex models
-
-Install Codex using OpenAI's current installer, then sign in:
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-codex login
-```
-
-Install this project:
 
 ```powershell
 git clone https://github.com/ncut-d1z/MultiAgentWorkflow.git
@@ -86,73 +61,237 @@ python -m pip install -e .
 maw doctor
 ```
 
-## Run
+## Configuration decision
 
-The safe default creates a new git branch + isolated worktree. The source checkout is not
-modified directly.
+MAW uses **persistent TOML configuration plus CLI overrides**.
+
+Configuration precedence is:
+
+```text
+CLI arguments
+    > project .maw.toml
+    > user ~/.multiagent-workflow/config.toml
+    > MAW non-model runtime defaults
+```
+
+On Windows, the user config is normally:
+
+```text
+%USERPROFILE%\.multiagent-workflow\config.toml
+```
+
+The project config is:
+
+```text
+<repository>\.maw.toml
+```
+
+### Why two persistent config files?
+
+The project file stores only the three preferences that naturally belong to a repository:
+
+```toml
+[workflow]
+architecture = "c2c"
+
+[worker]
+model = "your-worker-model"
+reasoning_effort = "high"
+```
+
+For safety, a project `.maw.toml` is **not allowed** to set command-execution or privilege
+settings. It cannot disable worktree isolation, request `danger-full-access`, inject
+verification commands, or replace the `c2c` executable. Those settings belong to the
+trusted user config or an explicit CLI invocation.
+
+This prevents a cloned repository from using its committed `.maw.toml` to silently widen
+agent permissions or execute arbitrary local commands.
+
+### Interactive first setup
+
+For a project:
+
+```powershell
+maw config init --scope project --repo D:\path\to\repo
+```
+
+MAW asks for:
+
+```text
+Workflow architecture [standalone/c2c]:
+Worker model [blank = current Codex default]:
+Worker reasoning effort [blank = current Codex default]:
+```
+
+The architecture must be selected before `maw run` can proceed. Worker model and effort may
+be blank intentionally.
+
+You can also set values individually:
+
+```powershell
+maw config set workflow.architecture standalone --scope project --repo D:\project
+maw config set worker.model gpt-5.6-terra --scope project --repo D:\project
+maw config set worker.reasoning_effort high --scope project --repo D:\project
+```
+
+Remove a pin and go back to the Codex default:
+
+```powershell
+maw config unset worker.model --scope project --repo D:\project
+maw config unset worker.reasoning_effort --scope project --repo D:\project
+```
+
+Inspect the effective configuration and both file locations:
+
+```powershell
+maw config show --repo D:\project
+maw config path --repo D:\project
+```
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all supported settings.
+
+---
+
+# Architecture 1: standalone
+
+This preserves the original MAW design:
+
+```text
+User goal
+   |
+   v
+Manager (read-only Codex session)
+   |
+   v
+TaskSpec[]
+   |
+   v
+Worker (selected model + selected effort, workspace-write)
+   |
+   v
+Harness: real git diff/status + verifier output
+   |
+   v
+Reviewer (read-only Codex session)
+   | PASS
+   +------------------> checkpoint -> next task
+   |
+   | REVISE
+   v
+Worker retry with reviewer findings
+```
+
+Run:
 
 ```powershell
 maw run `
-  --repo D:\path\to\your\repo `
+  --repo D:\path\to\repo `
+  --architecture standalone `
   --goal "Add frame-jump keyboard input and tests" `
   --verify "ctest --test-dir out/build --output-on-failure"
 ```
 
-Default model assignment:
+Normally `--architecture` can be omitted after it has been saved in `.maw.toml`.
 
-```text
-Manager  = gpt-5.6-sol
-Worker   = gpt-5.5
-Reviewer = gpt-5.6-sol
+Standalone creates an isolated git worktree by default. Every accepted task gets a local
+checkpoint commit. Use `--in-place` only when you deliberately want to modify the supplied
+checkout directly.
+
+Manager and Reviewer models are also configurable, but are intentionally not project-level
+settings:
+
+```powershell
+maw config set standalone.manager.model gpt-5.6-sol --scope user
+maw config set standalone.manager.reasoning_effort high --scope user
+maw config set standalone.reviewer.model gpt-5.6-sol --scope user
+maw config set standalone.reviewer.reasoning_effort high --scope user
 ```
 
-Override any role independently:
+If these are unset, Codex chooses its current defaults.
+
+### Deterministic gate
+
+The Reviewer does not receive only the Worker's self-report. MAW independently records the
+actual git status/diff and verifier stdout/stderr/exit codes. In `standalone`, a failing
+configured verifier forces `REVISE` even if the LLM Reviewer mistakenly returns `PASS`.
+
+---
+
+# Architecture 2: c2c
+
+This architecture is specifically designed to coexist with the
+[`codex-with-chatgpt`](https://github.com/XiaoDuoYa/codex-with-chatgpt) Skill.
+
+```text
+ChatGPT Web / Sol
+  Manager + Reviewer
+        |
+        | C2C PLAN / REVIEW
+        v
+Outer Codex session + codex-with-chatgpt Skill
+        |
+        | execute current PLAN
+        v
+MultiAgentWorkflow (architecture=c2c)
+        |
+        v
+Worker (user-selected model + effort)
+        |
+        v
+workspace changes + deterministic verification
+        |
+        +---- optional `c2c record` metadata/output ----+
+        |                                               |
+        +---------------- C2C read-only MCP ------------+
+                                                        v
+                                                ChatGPT Reviewer
+```
+
+Important differences from `standalone`:
+
+- MAW does **not** create another Manager.
+- MAW does **not** create another Reviewer.
+- MAW does **not** internally loop on review feedback.
+- MAW executes exactly one already-produced C2C PLAN/instruction.
+- MAW works in the exact repository/worktree supplied to it.
+- MAW does not checkpoint-commit C2C changes, so ChatGPT can inspect the current diff.
+- The C2C/ChatGPT layer decides `PLAN`, `DONE`, or `BLOCKED` for the next protocol step.
+
+Example single C2C execution iteration:
 
 ```powershell
 maw run `
   --repo D:\project `
-  --goal-file .\task.txt `
-  --manager-model gpt-5.6-sol `
+  --architecture c2c `
+  --goal-file .\current-c2c-plan.txt `
   --worker-model gpt-5.6-terra `
-  --reviewer-model gpt-5.6-sol `
-  --max-revisions 4 `
+  --worker-effort high `
   --verify "python -m pytest"
 ```
 
-MultiAgentWorkflow **never silently substitutes a model**. If `gpt-5.5` is not enabled on
-your current ChatGPT/Codex route, the run fails with an explicit error so you can choose a
-model that `codex` can actually access.
-
-### In-place mode
-
-Only use this when you intentionally want the agents to edit your current checkout:
+If the outer Skill supplies the current C2C task ID and iteration, MAW can also perform the
+required `c2c record` step:
 
 ```powershell
-maw run --repo . --goal "..." --in-place
+maw run `
+  --repo D:\project `
+  --architecture c2c `
+  --goal-file .\current-c2c-plan.txt `
+  --c2c-record `
+  --c2c-task-id c2c_f81a `
+  --c2c-iteration 2 `
+  --verify "python -m pytest"
 ```
 
-The default isolated worktree mode is strongly preferred.
+MAW records changed-file count, verification summary, exit status and one selected verifier
+output through `c2c record`. It never pastes the diff/log into a ChatGPT prompt; the external
+ChatGPT Reviewer continues to inspect the workspace through C2C's read-only MCP tools.
 
-### Worker sandbox
+See [docs/CODEX_WITH_CHATGPT.md](docs/CODEX_WITH_CHATGPT.md) for the intended integration.
 
-Default:
+## Runtime state
 
-```text
---worker-sandbox workspace-write
-```
-
-You can explicitly request Codex's broad mode:
-
-```text
---worker-sandbox danger-full-access
-```
-
-Do this only in a disposable/isolated worktree. `danger-full-access` is not constrained to
-that worktree by this Python program.
-
-## Deterministic review gate
-
-For each task the harness records:
+Standalone:
 
 ```text
 ~/.multiagent-workflow/runs/<run-id>/
@@ -170,67 +309,59 @@ For each task the harness records:
       outcome.json
 ```
 
-`evidence.json` contains the actual git status/diff and verifier stdout/stderr/exit code.
-If any configured verifier fails, the harness forces the task to `REVISE` even if the LLM
-Reviewer incorrectly emits `PASS`.
+C2C execution iteration:
 
-When using the default isolated worktree, every accepted task becomes a local checkpoint
-commit on a branch named `maw/<run-id>`.
+```text
+~/.multiagent-workflow/runs/<run-id>/
+  run.json
+  worker.md
+  evidence.json
+  diff.patch
+  verification-output.txt   # when a verifier output is released to c2c
+  result.json
+```
 
-## Why a CLI backend instead of direct API calls?
+## CLI overrides
 
-This project is aimed at users who already have a ChatGPT/Codex login but do not have (or
-do not want to manage) an API key. The Codex CLI owns authentication, model access, coding
-tools, and sandbox behavior; this project owns only orchestration, evidence capture, and
-the review loop.
+Persistent settings are conveniences, not locks. For one run:
 
-This also follows a pattern used by existing open-source coding-agent orchestrators: treat
-agent CLIs as swappable execution backends and keep the loop deterministic outside the
-model.
+```powershell
+maw run `
+  --repo D:\project `
+  --architecture standalone `
+  --worker-model some-new-model `
+  --worker-effort some-new-effort `
+  --goal "..."
+```
 
-## Related open-source projects / design references
+MAW deliberately does not validate Worker model IDs or reasoning-effort names against a
+hard-coded catalog. Codex is the authority; if Codex rejects a value, MAW surfaces that
+error instead of silently switching to another model.
 
-MultiAgentWorkflow is an independent implementation. The following projects were reviewed
-for architectural ideas; no source files were copied into this repository.
+## Related projects / design references
 
+- **codex-with-chatgpt** — https://github.com/XiaoDuoYa/codex-with-chatgpt  
+  ChatGPT plans/reviews through a read-only MCP bridge; Codex owns execution.
 - **master-workflow** — https://github.com/luckeyfaraday/master-workflow  
-  Deterministic worker -> cross-model reviewer loop, real git diff as review evidence,
-  fresh worker contexts, audit ledger, read-only reviewer.
+  Deterministic worker/reviewer loop, real git diff review evidence, audit trail.
 - **Athena Loops** — https://github.com/luckeyfaraday/athena-loops  
-  Python orchestrator -> worker -> reviewer harness, backend adapter seam, termination
-  guards, CLI/MCP integration, optional git worktree isolation.
+  Python orchestrator/worker/reviewer harness with backend adapter seam and worktrees.
 - **MCO** — https://github.com/mco-org/mco  
-  CLI-first orchestration across multiple coding-agent providers/models with explicit
-  read/write permission modes and raw artifact retention.
-- **Agent Orchestrator** — https://github.com/Untrivial-ai/agent-orchestrator  
-  One task/agent/worktree model with review, CI and feedback-loop supervision.
-- **multiAgents** — https://github.com/1345191768/multiAgents  
-  Local multi-agent coding orchestrator using isolated git worktrees and configurable
-  model routing.
-- **multiagent-code** — https://github.com/willsmanley/multiagent-code  
-  Orchestrator/Manager/Worker coding hierarchy with Manager review of Worker output.
-- **agentUniverse (Gitee)** — https://gitee.com/agentUniverse  
-  Multi-agent pattern factory; its PEER pattern separates Plan, Execute, Express, Review.
-- **emage.code (GitLab)** — https://gitlab.com/em-age/emage.code  
-  Multi-platform AI development-team orchestration with plan/approve/execute and validation
-  gates.
+  CLI-first multi-agent/provider orchestration with explicit permission modes.
 
-## Known upstream caveats (September 2026)
-
-- Some users have recently reported that `gpt-5.5` is visible in Codex model metadata but
-  fails on the ChatGPT-auth Codex route with model-not-found/access errors. This is an
-  upstream entitlement/routing condition, not something this harness can bypass.
-- Codex sandbox behavior depends on OS and Codex version. In particular, there have been
-  recent Windows reports involving `workspace-write`. Keep the isolated-worktree default,
-  run deterministic verification commands, and inspect the final branch before merging.
+MAW is an independent implementation; no source files from these projects are copied here.
 
 ## Tests
 
-The unit tests do not call an LLM. They use a fake backend and a temporary git repository:
+The tests use fake model backends and temporary git repositories; they do not consume model
+quota:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+Current tests cover both workflow architectures, config precedence/security, model/effort
+forwarding, worktree isolation, C2C metadata recording and schema validation.
 
 ## License
 

@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multiagent-workflow"
-version = "0.1.0"
-description = "Deterministic Manager -> Worker -> Reviewer orchestration over Codex CLI"
+version = "0.2.0"
+description = "Configurable standalone and Codex-with-ChatGPT multi-agent workflows"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "ncut-d1z"}]
-dependencies = []
+dependencies = [
+  "tomli>=2.0; python_version < '3.11'",
+]
 keywords = ["agents", "codex", "multi-agent", "orchestration", "review"]
 classifiers = [
   "Programming Language :: Python :: 3",
